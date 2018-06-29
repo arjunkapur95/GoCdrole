@@ -1,0 +1,145 @@
+---
+- name: 'Fail if not using Apt or Yum.  Do a manual install for now :-('
+  fail: msg='This role only supports Yum or Apt package managers at the moment.  Please do a manual install instead.'
+  when: ansible_pkg_mgr != 'yum' and ansible_pkg_mgr != 'apt'
+
+- name: "yum install Java {{ GOCD_JAVA_PACKAGE_VERSION_YUM }} and some basic dependencies"
+  become: yes
+  yum: name={{ item }} state=present
+  with_items:
+   - unzip
+   - which
+   - "{{ GOCD_JAVA_PACKAGE_YUM }}"
+  when: ansible_pkg_mgr == 'yum'
+
+- name: "apt install Java {{ GOCD_JAVA_PACKAGE_VERSION_DEB }} and some basic dependencies. Must be installed before repo."
+  become: yes
+  apt: name={{ item }} state=present update_cache=true
+  with_items:
+   - python-pycurl
+   - unzip
+   - "{{ GOCD_JAVA_PACKAGE_DEB }}"
+  when: ansible_pkg_mgr == 'apt'
+
+- name: determine JAVA_HOME
+  shell: readlink -f /usr/bin/java | sed "s:bin/java::"
+  register: system_java_home
+  changed_when: false
+
+- name: set GOCD_JAVA_HOME
+  set_fact:
+     GOCD_JAVA_HOME: "{{ system_java_home.stdout }}"
+
+- name: thoughtworks go yum repository
+  become: yes
+  copy: src=thoughtworks-go-download.repo
+        dest=/etc/yum.repos.d/
+        owner=root group=root mode=0644
+  when: ansible_pkg_mgr == 'yum'
+
+- name: thoughtworks go apt repository
+  become: yes
+  apt_repository: repo='deb {{GOCD_DEBIAN_REPOSITORY}} /' state=present
+  when: ansible_pkg_mgr == 'apt'
+
+# Note: If the user or group exists, but under another ID, Ansible will try and change it.
+- name: add go group
+  become: yes
+  group: gid={{ GOCD_GROUPID }} name={{ GOCD_GROUP }} state=present
+
+- name: add go user with home at /var/go
+  become: yes
+  user: name={{ GOCD_USER }} comment="Go CD User" uid={{ GOCD_USERID }} group={{ GOCD_GROUP }} home=/var/go
+
+- name: Go's .ssh folder
+  file: path=/var/go/.ssh state=directory group={{ GOCD_GROUP }} owner={{ GOCD_USER }}
+  when: GOCD_CONFIGURE_SSH
+
+- name: SSH public key
+  copy: "dest=/var/go/.ssh/{{ GOCD_SSH_PUBLIC_KEY | basename}} src='{{ GOCD_SSH_PUBLIC_KEY }}' group={{ GOCD_GROUP }} mode=0644 owner={{ GOCD_USER }}"
+  when: GOCD_CONFIGURE_SSH
+
+- name: SSH private key
+  copy: "dest=/var/go/.ssh/{{ GOCD_SSH_PRIVATE_KEY | basename}} src='{{ GOCD_SSH_PRIVATE_KEY }}' group={{ GOCD_GROUP }} mode=0600 owner={{ GOCD_USER }}"
+  when: GOCD_CONFIGURE_SSH
+
+- name: ensure git server is a known host
+  lineinfile:
+    dest: /var/go/.ssh/known_hosts
+    create: yes
+    state: present
+    line: "{{ lookup('pipe', 'ssh-keyscan -t rsa ' + GOCD_SSH_KNOWN_DOMAIN) }}"
+    regexp: "^{{ GOCD_SSH_KNOWN_DOMAIN|replace('.', '\\.') }}"
+    group: "{{ GOCD_GROUP }}"
+    mode: 0644
+    owner: "{{ GOCD_USER }}"
+  when: GOCD_CONFIGURE_SSH
+
+- name: create log directory
+  become: yes
+  file: path=/var/log/go-server state=directory owner={{ GOCD_USER }} group={{ GOCD_GROUP }}
+
+- name: create run directory
+  become: yes
+  file: path=/var/run/go-server state=directory
+
+- name: create var/lib/go-server directory
+  become: yes
+  file: path=/var/lib/go-server state=directory owner={{ GOCD_USER }} group={{ GOCD_GROUP }}
+
+- name: create etc/go directory
+  become: yes
+  file: path=/etc/go state=directory owner={{ GOCD_USER }} group={{ GOCD_GROUP }}
+
+- name: determine latest version of Go available in yum repo
+  shell: yum list go-server |grep go-server |awk '{print $2}'
+  register: tmp_go_version
+  changed_when: false
+  when: GOCD_GO_VERSION == 'latest' and ansible_pkg_mgr=='yum'
+  tags:
+    - skip_ansible_lint
+
+- name: determine latest version of Go available in apt repo
+  shell: apt-cache show go-server |grep Version |awk '{print $2}' |head -1
+  register: tmp_go_version_apt
+  changed_when: false
+  when: GOCD_GO_VERSION == 'latest' and ansible_pkg_mgr=='apt'
+  tags:
+    - skip_ansible_lint
+
+# Variables are registered even if a task is skipped. We use default to choose between apt/yum variable.
+- name: Set GOCD_GO_VERSION to latest
+  set_fact:
+     GOCD_GO_VERSION: "{{ tmp_go_version.stdout | default(tmp_go_version_apt.stdout) }}"
+  when: GOCD_GO_VERSION == 'latest'
+
+# Optional dependencies, for both checking for changes & checking out code.  Install on both agent & server.
+- name: yum install git
+  become: yes
+  yum: pkg=git state=installed
+  when: ansible_pkg_mgr=='yum' and GOCD_SCM_GIT
+
+- name: apt install git
+  become: yes
+  apt: pkg=git state=present
+  when: ansible_pkg_mgr=='apt' and GOCD_SCM_GIT
+
+- name: yum install mercurial
+  become: yes
+  yum: pkg=mercurial state=installed
+  when: ansible_pkg_mgr=='yum' and GOCD_SCM_MERCURIAL
+
+- name: apt install mercurial
+  become: yes
+  apt: pkg=mercurial state=present
+  when: ansible_pkg_mgr=='apt' and GOCD_SCM_MERCURIAL
+
+- name: yum install subversion
+  become: yes
+  yum: pkg=subversion state=installed
+  when: ansible_pkg_mgr=='yum' and GOCD_SCM_SVN
+
+- name: apt install subversion
+  become: yes
+  apt: pkg=subversion state=present
+  when: ansible_pkg_mgr=='apt' and GOCD_SCM_SVN
